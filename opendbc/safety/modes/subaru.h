@@ -28,6 +28,7 @@
 
 #define MSG_SUBARU_ES_LKAS               0x122U
 #define MSG_SUBARU_ES_LKAS_ANGLE         0x124U
+#define MSG_SUBARU_ES_LKAS_ANGLE_SECOC   0x11EU
 #define MSG_SUBARU_ES_Brake              0x220U
 #define MSG_SUBARU_ES_Distance           0x221U
 #define MSG_SUBARU_ES_Status             0x222U
@@ -86,6 +87,10 @@ static bool subaru_longitudinal = false;
 static bool subaru_lkas_angle = false;
 static bool subaru_lkas_angle_alt_position = false;
 static bool subaru_throttle_on_alt_bus = false;
+// EXPERIMENTAL (MY26 Outback SecOC test): true while openpilot is actively steering (its
+// ES_LKAS_ANGLE carries LKAS_Request=1). Used to block the camera's SecOC-signed 0x11E only
+// while openpilot is replacing it with its own replayed copy.
+static bool subaru_secoc_replace_active = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -207,6 +212,20 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
       bool lkas_request = GET_BIT(msg, 12U);
 
       violation |= steer_angle_cmd_checks(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS);
+
+      // EXPERIMENTAL (MY26 Outback SecOC test): mirror openpilot's steer request so the fwd
+      // hook only blocks the camera's 0x11E while we are actively replacing it.
+      subaru_secoc_replace_active = lkas_request;
+    }
+
+    // EXPERIMENTAL (MY26 Outback SecOC test): openpilot's replayed ES_LKAS_ANGLE_SECOC (0x11E).
+    // Angle is at Motorola bit 0 (byte0 bit0 = MSB, byte1, byte2); LKAS_Request at bit 28.
+    if (msg->addr == MSG_SUBARU_ES_LKAS_ANGLE_SECOC) {
+      int desired_angle = ((uint32_t)(msg->data[0] & 0x1U) << 16) | ((uint32_t)msg->data[1] << 8) | (uint32_t)msg->data[2];
+      desired_angle = -1 * to_signed(desired_angle, 17);
+      bool lkas_request = GET_BIT(msg, 28U);
+
+      violation |= steer_angle_cmd_checks(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS);
     }
   }
 
@@ -278,10 +297,12 @@ static safety_config subaru_init(uint16_t param) {
   static const CanMsg SUBARU_LKAS_ANGLE_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    {MSG_SUBARU_ES_LKAS_ANGLE_SECOC, SUBARU_MAIN_BUS, 8, .check_relay = false},  // EXPERIMENTAL SecOC replay
   };
 
   static const CanMsg SUBARU_LKAS_ANGLE_LONG_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE) // lat
+    {MSG_SUBARU_ES_LKAS_ANGLE_SECOC, SUBARU_MAIN_BUS, 8, .check_relay = false},  // EXPERIMENTAL SecOC replay
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
     SUBARU_COMMON_LONG_TX_MSGS(SUBARU_ALT_BUS) // long
     SUBARU_GEN2_LONG_ADDITIONAL_TX_MSGS()
@@ -341,10 +362,28 @@ static safety_config subaru_init(uint16_t param) {
   return ret;
 }
 
+static bool subaru_fwd_hook(int bus_num, int addr) {
+  bool block_msg = false;
+
+  // EXPERIMENTAL (MY26 Outback SecOC test): while openpilot is actively steering it replays the
+  // camera's ES_LKAS_ANGLE_SECOC (0x11E) with only the angle swapped. Block the camera's own
+  // 0x11E from reaching the car ONLY during that window (subaru_secoc_replace_active, mirrored
+  // from openpilot's ES_LKAS_ANGLE steer request) so the car sees exactly one 0x11E stream and
+  // openpilot's replayed copy is the one it acts on. Outside that window the camera's 0x11E
+  // forwards normally, so stock behavior is untouched.
+  if (subaru_lkas_angle && subaru_secoc_replace_active && ((unsigned int)bus_num == SUBARU_CAM_BUS) &&
+      ((unsigned int)addr == MSG_SUBARU_ES_LKAS_ANGLE_SECOC)) {
+    block_msg = true;
+  }
+
+  return block_msg;
+}
+
 const safety_hooks subaru_hooks = {
   .init = subaru_init,
   .rx = subaru_rx_hook,
   .tx = subaru_tx_hook,
+  .fwd = subaru_fwd_hook,
   .get_counter = subaru_get_counter,
   .get_checksum = subaru_get_checksum,
   .compute_checksum = subaru_compute_checksum,

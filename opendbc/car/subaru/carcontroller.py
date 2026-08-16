@@ -21,6 +21,7 @@ class CarController(CarControllerBase):
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
+    self.last_secoc_counter = -1  # EXPERIMENTAL SecOC test: last replayed camera 0x11E counter
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
@@ -87,6 +88,20 @@ class CarController(CarControllerBase):
         can_sends.append(self.handle_angle_lateral(CC, CS))
       else:
         can_sends.append(self.handle_torque_lateral(CC, CS))
+
+    # *** EXPERIMENTAL: MY26 Outback SecOC angle-replay test ***
+    # While actively steering, replay the camera's SecOC-signed ES_LKAS_ANGLE_SECOC (0x11E)
+    # once per fresh camera frame (preserving its counter sequence), overwriting ONLY the angle
+    # field with our command. Counter/freshness/MAC are the camera's, so the MAC no longer
+    # matches the angle. The panda blocks the camera's own 0x11E only while we're doing this, so
+    # the car sees exactly one 0x11E stream with no gap. If the EPS validates the MAC over the
+    # angle it rejects us; if it only checks presence/counter it steers to our angle.
+    # Requires the car's LKAS to be granted (camera LKAS_Request=1) or the panda blocks our TX.
+    if (self.CP.flags & SubaruFlags.LKAS_ANGLE) and CC.latActive and CS.es_lkas_angle_secoc_msg is not None:
+      secoc_counter = int(CS.es_lkas_angle_secoc_msg["B3"]) & 0x0F
+      if secoc_counter != self.last_secoc_counter:
+        self.last_secoc_counter = secoc_counter
+        can_sends.append(subarucan.create_steering_control_angle_secoc(self.packer, CS.es_lkas_angle_secoc_msg, self.apply_angle_last))
 
     # *** longitudinal ***
 

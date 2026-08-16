@@ -18,6 +18,7 @@ class SubaruMsg(enum.IntEnum):
   Wheel_Speeds      = 0x13a
   ES_LKAS           = 0x122
   ES_LKAS_ANGLE     = 0x124
+  ES_LKAS_ANGLE_SECOC = 0x11E
   ES_Brake          = 0x220
   ES_Distance       = 0x221
   ES_Status         = 0x222
@@ -172,7 +173,7 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
   ALT_MAIN_BUS = SUBARU_ALT_BUS
   ALT_CAM_BUS = SUBARU_ALT_BUS
 
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE)
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE) + [[SubaruMsg.ES_LKAS_ANGLE_SECOC, SUBARU_MAIN_BUS]]
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus,
                                                SubaruMsg.ES_LKAS_State, SubaruMsg.ES_Infotainment)}
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
@@ -203,6 +204,21 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
   def _pcm_status_msg(self, enable):
     values = {"Cruise_Activated": enable}
     return self.packer.make_can_msg_safety("ES_Brake", self.ALT_CAM_BUS, values)
+
+  def test_secoc_replay_forwarding(self):
+    # EXPERIMENTAL: the camera's ES_LKAS_ANGLE_SECOC (0x11E) is forwarded cam->main normally,
+    # and blocked ONLY while openpilot is actively steering (its ES_LKAS_ANGLE has request=1),
+    # so openpilot's replayed copy is the only one the car sees during that window.
+    self.safety.set_controls_allowed(True)
+    # openpilot not requesting steer -> camera 0x11E forwards through
+    self.safety.safety_tx_hook(self._angle_cmd_msg(0, enabled=0))
+    self.assertEqual(SUBARU_MAIN_BUS, self.safety.safety_fwd_hook(SUBARU_CAM_BUS, SubaruMsg.ES_LKAS_ANGLE_SECOC))
+    # openpilot actively steering -> camera 0x11E blocked
+    self.safety.safety_tx_hook(self._angle_cmd_msg(0, enabled=1))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(SUBARU_CAM_BUS, SubaruMsg.ES_LKAS_ANGLE_SECOC))
+    # back to not steering -> forwards again
+    self.safety.safety_tx_hook(self._angle_cmd_msg(0, enabled=0))
+    self.assertEqual(SUBARU_MAIN_BUS, self.safety.safety_fwd_hook(SUBARU_CAM_BUS, SubaruMsg.ES_LKAS_ANGLE_SECOC))
 
 
 class TestSubaruGen1TorqueStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruTorqueSafetyBase):

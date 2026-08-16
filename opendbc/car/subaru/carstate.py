@@ -15,6 +15,10 @@ class CarState(CarStateBase):
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
 
+    # EXPERIMENTAL (MY26 Outback SecOC test): latest camera ES_LKAS_ANGLE_SECOC (0x11E) frame,
+    # None until the camera has sent one.
+    self.es_lkas_angle_secoc_msg = None
+
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
@@ -137,6 +141,14 @@ class CarState(CarStateBase):
     self.es_dashstatus_msg = copy.copy(cp_cam.vl["ES_DashStatus"])
     if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
       self.es_infotainment_msg = copy.copy(cp_cam.vl["ES_Infotainment"])
+
+    # EXPERIMENTAL (MY26 Outback SecOC test): capture the camera's SecOC-signed angle frame
+    # (0x11E) so the carcontroller can replay it with only the angle swapped. Populated once
+    # the camera has sent at least one frame; None until then (carcontroller must null-check).
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      secoc = cp_cam.vl["ES_LKAS_ANGLE_SECOC"]
+      if len(cp_cam.vl_all["ES_LKAS_ANGLE_SECOC"]["B0"]) > 0:
+        self.es_lkas_angle_secoc_msg = copy.copy(secoc)
 
     return ret
 

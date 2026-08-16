@@ -22,6 +22,25 @@ def create_steering_control_angle(packer, apply_torque, steer_req):
   return packer.make_can_msg("ES_LKAS_ANGLE", 0, values)
 
 
+def create_steering_control_angle_secoc(packer, secoc_msg, apply_angle=None):
+  # EXPERIMENTAL (MY26 Outback SecOC test): replay the camera's most recent
+  # ES_LKAS_ANGLE_SECOC (0x11E) frame byte-for-byte. If apply_angle is None (openpilot not
+  # actively steering) the frame is sent UNCHANGED - a transparent passthrough with the MAC
+  # intact, so the car doesn't fault. If apply_angle is given (actively steering) ONLY the
+  # 17-bit angle field (LKAS_Output, Motorola 0|17, -0.01 deg/LSB: byte0 bit0 = MSB, byte1,
+  # byte2) is overwritten; counter, freshness and the 28-bit AUTH/MAC are preserved exactly.
+  # If the EPS validates the MAC over the angle the swapped frame is rejected; if it only
+  # checks presence/counter, the car steers to our angle. secoc_msg is
+  # CS.es_lkas_angle_secoc_msg (the parsed camera frame, B0..B7).
+  values = dict(secoc_msg)
+  if apply_angle is not None:
+    raw = (-int(round(apply_angle * 100.))) & 0x1FFFF  # 17-bit two's complement, -0.01 scale
+    values["B0"] = (int(values["B0"]) & 0xFE) | ((raw >> 16) & 0x1)
+    values["B1"] = (raw >> 8) & 0xFF
+    values["B2"] = raw & 0xFF
+  return packer.make_can_msg("ES_LKAS_ANGLE_SECOC", 0, values)
+
+
 def create_steering_status(packer):
   return packer.make_can_msg("ES_LKAS_State", 0, {})
 
