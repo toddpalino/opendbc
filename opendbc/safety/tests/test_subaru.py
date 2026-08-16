@@ -220,6 +220,46 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
     self.safety.safety_tx_hook(self._angle_cmd_msg(0, enabled=0))
     self.assertEqual(SUBARU_MAIN_BUS, self.safety.safety_fwd_hook(SUBARU_CAM_BUS, SubaruMsg.ES_LKAS_ANGLE_SECOC))
 
+  def _angle_cmd_secoc_msg(self, angle):
+    # ES_LKAS_ANGLE_SECOC (0x11E) has no named DBC signals (opaque SecOC payload); build raw
+    # bytes matching subaru_tx_hook's decode of the angle field: 17-bit signed, Motorola bit 0
+    # (byte0 bit0, byte1, byte2), negated. Bytes 3-7 (freshness/counter/MAC in the real camera
+    # frame) don't affect the check under test and are left zero.
+    desired_angle = round(angle * self.DEG_TO_CAN)
+    raw17 = (-desired_angle) & 0x1FFFF
+    dat = bytes([raw17 >> 16, (raw17 >> 8) & 0xFF, raw17 & 0xFF, 0, 0, 0, 0, 0])
+    return common.make_msg(SUBARU_MAIN_BUS, SubaruMsg.ES_LKAS_ANGLE_SECOC, 8, dat)
+
+  def test_secoc_replay_tx_accepted_when_active(self):
+    # EXPERIMENTAL: subaru_tx_hook's ES_LKAS_ANGLE_SECOC (0x11E) check must track the same
+    # active/inactive state as ES_LKAS_ANGLE (0x124), via subaru_secoc_replace_active -- not a
+    # bit inside 0x11E's opaque SecOC payload. That bit isn't a real request flag (it's camera
+    # framing passed through unmodified by the angle-only overwrite) and reads 0 the whole time
+    # openpilot replays it, so treating it as "steer_control_enabled" made every replayed frame
+    # take the "inactive" branch (angle must track measured angle within ~1 deg) even while
+    # actively steering -- rejected every cycle, and because a rejected call resets the *shared*
+    # desired_angle_last to the measured angle, it also intermittently corrupted 0x124's own
+    # rate-limit tracking. See logs/52565cf and scripts/replay_fault_ground_truth.py.
+    self.safety.set_controls_allowed(True)
+    self.safety.set_angle_meas(0, 0)
+    self.safety.set_desired_angle_last(0)
+
+    # inactive: a replayed 0x11E that doesn't track the measured angle must still be rejected
+    self.safety.safety_tx_hook(self._angle_cmd_msg(0, enabled=0))
+    self.assertFalse(self.safety.safety_tx_hook(self._angle_cmd_secoc_msg(10)))
+    self.assertTrue(self.safety.safety_tx_hook(self._angle_cmd_secoc_msg(0)))
+
+    # active: 0x124 and the mirrored 0x11E replay must both be accepted, even as the commanded
+    # angle pulls ahead of the (slower-moving) measured angle
+    self.assertTrue(self.safety.safety_tx_hook(self._angle_cmd_msg(1, enabled=1)))
+    self.assertTrue(self.safety.safety_tx_hook(self._angle_cmd_secoc_msg(1)))
+    self.assertTrue(self.safety.safety_tx_hook(self._angle_cmd_msg(2, enabled=1)))
+    self.assertTrue(self.safety.safety_tx_hook(self._angle_cmd_secoc_msg(2)))
+
+    # back to inactive: a stale/active-looking angle no longer gets a free pass
+    self.safety.safety_tx_hook(self._angle_cmd_msg(2, enabled=0))
+    self.assertFalse(self.safety.safety_tx_hook(self._angle_cmd_secoc_msg(2)))
+
 
 class TestSubaruGen1TorqueStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruTorqueSafetyBase):
   FLAGS = 0

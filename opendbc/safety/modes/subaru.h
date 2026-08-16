@@ -219,11 +219,23 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     }
 
     // EXPERIMENTAL (MY26 Outback SecOC test): openpilot's replayed ES_LKAS_ANGLE_SECOC (0x11E).
-    // Angle is at Motorola bit 0 (byte0 bit0 = MSB, byte1, byte2); LKAS_Request at bit 28.
+    // Angle is at Motorola bit 0 (byte0 bit0 = MSB, byte1, byte2). Bit 28 is NOT a real
+    // LKAS-request flag for this message -- it's camera SecOC framing passed through
+    // unmodified by the angle-only overwrite, and reads 0 the whole time we're actively
+    // steering. Using it here made every replayed frame take the "inactive" branch of
+    // steer_angle_cmd_checks() (which requires the commanded angle to stay within ~1 deg of
+    // the current measured angle), so the replay was rejected on every single cycle -- and
+    // because that check unconditionally resets the shared desired_angle_last to the measured
+    // angle on violation, it also corrupted ES_LKAS_ANGLE's (0x124) rate-limit tracking each
+    // cycle, causing intermittent 0x124 rejections too. Confirmed via ground-truth replay of
+    // logs/52565cf against this exact code (scripts/replay_fault_ground_truth.py): 0x11E was
+    // tx_hook-rejected 100% of cycles during the only engage attempt. Use the same real,
+    // correctly-decoded signal the fwd hook already trusts for this instead of guessing at a
+    // bit inside the opaque payload.
     if (msg->addr == MSG_SUBARU_ES_LKAS_ANGLE_SECOC) {
       int desired_angle = ((uint32_t)(msg->data[0] & 0x1U) << 16) | ((uint32_t)msg->data[1] << 8) | (uint32_t)msg->data[2];
       desired_angle = -1 * to_signed(desired_angle, 17);
-      bool lkas_request = GET_BIT(msg, 28U);
+      bool lkas_request = subaru_secoc_replace_active;
 
       violation |= steer_angle_cmd_checks(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS);
     }
